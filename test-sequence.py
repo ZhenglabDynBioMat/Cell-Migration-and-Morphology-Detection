@@ -1,195 +1,163 @@
 import os
-import numpy as np
 import cv2
+import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 from skimage import measure, filters
 from scipy.fft import fft2, ifft2, fftshift
 from scipy.ndimage import gaussian_filter
-from skimage.draw import circle_perimeter
 from skimage.morphology import skeletonize, closing, opening, square
 from tkinter import filedialog, Tk
-import pandas as pd
 
-# Settings
-scale = 0.8720
-sensitivity_bin = 0.51
+# Configuration
+scale = 0.5
+sensitivity_threshold = 0.51
 
-# Choose image from directory
+# Select directory with TIFF images
 root = Tk()
 root.withdraw()
-myDir = filedialog.askdirectory()  # Select directory
-myFiles = [f for f in os.listdir(myDir) if f.endswith('.tif')]
+directory = filedialog.askdirectory()
+file_list = [f for f in os.listdir(directory) if f.endswith('.tif')]
 
-# Read files and create 3D image stack
-array = []
-for file in myFiles:
-    fullFileName = os.path.join(myDir, file)
-    img = cv2.imread(fullFileName, cv2.IMREAD_GRAYSCALE)  # Read image as grayscale
-    array.append(img)
-array = np.stack(array, axis=-1)
+# Load image stack into a 3D array
+image_stack = [cv2.imread(os.path.join(directory, f), cv2.IMREAD_GRAYSCALE) for f in file_list]
+image_stack = np.stack(image_stack, axis=-1)
 
-# Select slice and select bead to analyze
-slice_selected = 1
-plt.imshow(array[:, :, slice_selected - 1], cmap='gray')
-plt.title(f'Slice {slice_selected - 1}')
+# Select and preview image slice
+slice_index = 1
+plt.imshow(image_stack[:, :, slice_index - 1], cmap='gray')
+plt.title(f'Slice {slice_index - 1}')
 plt.show()
-
-# Crop image interactively
-roi = cv2.selectROI("Select Region", array[:, :, slice_selected - 1], fromCenter=False)
-loc = (roi[0], roi[1], roi[2], roi[3])
-
-cropped_array = array[loc[1]:loc[1] + loc[3], loc[0]:loc[0] + loc[2], slice_selected - 1]
-plt.imshow(cropped_array, cmap='gray')
-plt.show()
-
-# Detect the bead and measure its diameter
-# Assuming a function `detect_beads` exists for bead detection
-def detect_beads(image):
-    # Placeholder bead detection function
-    # In reality, you should implement the logic to detect beads
-    # For simplicity, just a mock function
-    circles = cv2.HoughCircles(image, cv2.HOUGH_GRADIENT, dp=1, minDist=20, param1=50, param2=30, minRadius=5, maxRadius=20)
-    if circles is not None:
-        circles = np.uint16(np.around(circles))
-        centers = circles[0, :, :2]
-        radii = circles[0, :, 2]
-        return centers, radii
-    return [], []
-
-centers, radii = detect_beads(cropped_array)
-if len(centers) > 0:
-    diameter = 2 * (radii / scale)
-    pd.DataFrame(diameter).to_csv('diameters.csv', mode='a', header=False)
-else:
-    print("No beads detected")
-
-# Transform Image to Fourier Space
-input_image = cropped_array.astype(np.float64)
-j = gaussian_filter(input_image, sigma=60)
-J = fftshift(fft2(j))
-
-# Apply Low Pass Filter
-low_pass = np.zeros_like(cropped_array)
-low_pass_size = cropped_array.shape[0] // 4
-low_pass[cropped_array.shape[0] // 2 - low_pass_size: cropped_array.shape[0] // 2 + low_pass_size,
-         cropped_array.shape[1] // 2 - low_pass_size: cropped_array.shape[1] // 2 + low_pass_size] = 1
-J_lowpass = J * low_pass
-j_lowpass = np.abs(ifft2(fftshift(J_lowpass)))
-
-# Plot the images
-plt.subplot(1, 3, 1)
-plt.imshow(cropped_array, cmap='gray')
-plt.title('Original Image')
-
-plt.subplot(1, 3, 2)
-plt.imshow(j_lowpass, cmap='gray')
-plt.title('Flat Field + Low Pass')
-
-plt.subplot(1, 3, 3)
-plt.imshow(np.log(np.abs(J_lowpass)), cmap='gray')
-plt.title('Fourier Domain')
-plt.show()
-
-# Non-local filter
-B = np.abs(j_lowpass)
-plt.imshow(B, cmap='gray')
 
 # Crop region of interest
-# Select ROI interactively
-roi = cv2.selectROI("Select Region", B, fromCenter=False)
-roi_position = roi
-patch = B[roi_position[1]:roi_position[1] + roi_position[3], roi_position[0]:roi_position[0] + roi_position[2]]
-patchSq = patch ** 2
-edist = np.sqrt(np.sum(patchSq, axis=2))
-patchSigma = np.sqrt(np.var(edist))
-DoS = 1.5 * patchSigma
-
-# Apply non-local means filter
-filtered_im = filters.rank.mean(B, selem=np.ones((5, 5)))  # Replace with an actual non-local filter if needed
-plt.imshow(filtered_im, cmap='gray')
-plt.title('Filtered Image')
+roi = cv2.selectROI("Select Region", image_stack[:, :, slice_index - 1], fromCenter=False)
+x, y, w, h = roi
+cropped = image_stack[y:y + h, x:x + w, slice_index - 1]
+plt.imshow(cropped, cmap='gray')
 plt.show()
 
-# Binarize
-B_f = 1 - filtered_im
-BW = B_f > sensitivity_bin
+# Basic bead detection using Hough Transform
+def detect_beads(image):
+    circles = cv2.HoughCircles(image, cv2.HOUGH_GRADIENT, dp=1, minDist=20,
+                                param1=50, param2=30, minRadius=5, maxRadius=20)
+    if circles is not None:
+        circles = np.uint16(np.around(circles))
+        return circles[0, :, :2], circles[0, :, 2]
+    return [], []
 
-# Morphological operations
+centers, radii = detect_beads(cropped)
+if centers:
+    diameters = 2 * (radii / scale)
+    pd.DataFrame(diameters).to_csv('diameters.csv', mode='a', header=False)
+else:
+    print("No beads detected.")
+
+# Fourier Transform and Low Pass Filtering
+image = cropped.astype(np.float64)
+blurred = gaussian_filter(image, sigma=60)
+fft_image = fftshift(fft2(blurred))
+
+low_pass_filter = np.zeros_like(cropped)
+filter_size = cropped.shape[0] // 4
+center = (cropped.shape[0] // 2, cropped.shape[1] // 2)
+low_pass_filter[center[0]-filter_size:center[0]+filter_size,
+                center[1]-filter_size:center[1]+filter_size] = 1
+
+filtered_fft = fft_image * low_pass_filter
+filtered_image = np.abs(ifft2(fftshift(filtered_fft)))
+
+# Display image processing steps
+plt.subplot(1, 3, 1)
+plt.imshow(cropped, cmap='gray')
+plt.title('Original')
+
+plt.subplot(1, 3, 2)
+plt.imshow(filtered_image, cmap='gray')
+plt.title('Low Pass')
+
+plt.subplot(1, 3, 3)
+plt.imshow(np.log(np.abs(filtered_fft)), cmap='gray')
+plt.title('Fourier')
+plt.show()
+
+# Non-local filtering (placeholder)
+B = np.abs(filtered_image)
+roi = cv2.selectROI("Select Region", B, fromCenter=False)
+patch = B[roi[1]:roi[1]+roi[3], roi[0]:roi[0]+roi[2]]
+patch_sigma = np.sqrt(np.var(patch ** 2))
+DoS = 1.5 * patch_sigma
+
+filtered = filters.rank.mean(B.astype(np.uint8), selem=np.ones((5, 5)))
+plt.imshow(filtered, cmap='gray')
+plt.title('Filtered')
+plt.show()
+
+# Binarization and Morphological Processing
+binary = 1 - filtered
+BW = binary > sensitivity_threshold
 BW = closing(BW, square(7))
 BW = opening(BW, square(3))
+
 plt.imshow(BW, cmap='gray')
-plt.title('After Morphological Operations')
+plt.title('Binary Morphology')
 plt.show()
 
 # Skeletonization
-skel = skeletonize(BW)
+skeleton = skeletonize(BW)
 plt.subplot(1, 2, 1)
-plt.imshow(input_image, cmap='gray')
-plt.title('Original Image')
+plt.imshow(image, cmap='gray')
+plt.title('Original')
 
 plt.subplot(1, 2, 2)
-plt.imshow(skel, cmap='gray')
+plt.imshow(skeleton, cmap='gray')
 plt.title('Skeleton')
 plt.show()
 
-# Overlay bead
-# Create a mask for the bead
-[rowsInImage, columnsInImage] = np.meshgrid(np.arange(1, B.shape[0] + 1), np.arange(1, B.shape[1] + 1))
-circlePixels = (rowsInImage - centers[0][1]) ** 2 + (columnsInImage - centers[0][0]) ** 2 <= radii[0] ** 2
-inner_circle = (rowsInImage - centers[0][1]) ** 2 + (columnsInImage - centers[0][0]) ** 2 <= (radii[0] - 1) ** 2
-skel = np.logical(skel + circlePixels) - inner_circle
+# Overlay bead detection on skeleton
+rows, cols = np.meshgrid(np.arange(B.shape[0]), np.arange(B.shape[1]), indexing='ij')
+circle_mask = (rows - centers[0][1]) ** 2 + (cols - centers[0][0]) ** 2 <= radii[0] ** 2
+inner_mask = (rows - centers[0][1]) ** 2 + (cols - centers[0][0]) ** 2 <= (radii[0] - 1) ** 2
+overlay = np.logical(skeleton + circle_mask) - inner_mask
 
-# Show overlay
-plt.imshow(skel, cmap='hot')
+plt.imshow(overlay, cmap='hot')
 plt.title('Bead Overlay')
 plt.show()
 
-# Labeling
-labeled_image, num_sprouts = measure.label(skel, connectivity=2, return_num=True)
+# Labeling and Measurement
+labeled, num_sprouts = measure.label(overlay, connectivity=2, return_num=True)
+
 plt.subplot(1, 2, 1)
-plt.imshow(1 - labeled_image, cmap='gray')
+plt.imshow(1 - labeled, cmap='gray')
 plt.title('Skeleton')
 
 plt.subplot(1, 2, 2)
-plt.imshow(labeled_image, cmap='autumn')
+plt.imshow(labeled, cmap='autumn')
 plt.title('Overlay')
 plt.show()
 
-# Measure length of sprouts
-sprouts = labeled_image - circlePixels
-sprouts = sprouts > 0
-sprouts_L, num_sprouts = measure.label(sprouts, connectivity=2)
-lengths = np.zeros(num_sprouts)
-for i in range(1, num_sprouts + 1):
-    lengths[i - 1] = np.sum(sprouts_L == i)
-lengths = lengths / scale
-average_length = np.mean(lengths)
-total_length = np.sum(lengths)
+# Sprout Length Measurement
+sprout_mask = (labeled > 0) & (~circle_mask)
+labeled_sprouts, num_sprouts = measure.label(sprout_mask, connectivity=2, return_num=True)
+lengths = np.array([np.sum(labeled_sprouts == i) for i in range(1, num_sprouts + 1)]) / scale
 
-# Export results to CSV
-filename = myFiles[slice_selected - 1]
+# Output Data
+filename = file_list[slice_index - 1]
 date, experiment = filename.split('_')[:2]
-slice_num = slice_selected - 1
-
-data = {
+output_data = {
     'date': date,
     'experiment': experiment,
-    'image_num': len(myFiles),
-    'slice': slice_num,
-    'diameter': diameter,
+    'image_num': len(file_list),
+    'slice': slice_index - 1,
+    'diameter': diameters,
     'num_sprouts': num_sprouts,
     'lengths': lengths,
-    'average_length': average_length,
-    'total_length': total_length,
-    'sensitivity_bin': sensitivity_bin
+    'average_length': np.mean(lengths),
+    'total_length': np.sum(lengths),
+    'sensitivity_bin': sensitivity_threshold
 }
+pd.DataFrame([output_data]).to_excel('sequenced-processions.xlsx', index=False, mode='a')
 
-df = pd.DataFrame([data])
-df.to_excel('sequenced-processions.xlsx', index=False, mode='a')
-
-# Save images
-output_image_file = f'Skeleton_{date}_{experiment}_z{slice_num}.png'
-cv2.imwrite(output_image_file, labeled_image.astype(np.uint8))
-
-output_mask_file = f'Overlay_{date}_{experiment}_z{slice_num}.png'
-cv2.imwrite(output_mask_file, np.uint8(cv2.addWeighted(B, 0.5, labeled_image, 0.5, 0)))
+# Save labeled and overlay images
+cv2.imwrite(f'Skeleton_{date}_{experiment}_z{slice_index - 1}.png', labeled.astype(np.uint8))
+cv2.imwrite(f'Overlay_{date}_{experiment}_z{slice_index - 1}.png',
+            np.uint8(cv2.addWeighted(B, 0.5, labeled, 0.5, 0)))
