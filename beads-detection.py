@@ -1,58 +1,49 @@
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
-from skimage import morphology
-from skimage.feature import canny
-from skimage.measure import label, regionprops
-from skimage.transform import hough_circle, hough_circle_peaks
-from skimage.draw import circle_perimeter
 
-def detect_beads(x):
-    # Convert to float64
-    x = np.float64(x)
+def detect_beads(image):
+    # Convert to float for processing
+    image = np.float64(image)
 
-    # Flatfield correction (basic approach in Python)
-    J = cv2.fastNlMeansDenoising(x.astype(np.uint8), None, 30, 7, 21)  # Use denoising as a placeholder for imflatfield
+    # Approximate flatfield correction with non-local means denoising
+    corrected = cv2.fastNlMeansDenoising(image.astype(np.uint8), None, 30, 7, 21)
 
-    # Log transformation
-    log_im = 3 * np.log(1 + J)
+    # Apply logarithmic transformation
+    log_image = 3 * np.log1p(corrected)
 
-    # Plot original and processed images
+    # Display original and processed images
     plt.figure(figsize=(10, 5))
     plt.subplot(1, 2, 1)
-    plt.imshow(x, cmap='gray')
-    plt.title('Original Image')
+    plt.imshow(image, cmap='gray')
+    plt.title('Original')
 
     plt.subplot(1, 2, 2)
-    plt.imshow(log_im, cmap='gray')
-    plt.title('Flatfield Corrected + Log Transformed Image')
+    plt.imshow(log_image, cmap='gray')
+    plt.title('Log Transformed')
     plt.show()
 
-    # Filter using a simple averaging filter
-    filtered_im = cv2.blur(log_im, (3, 3))
+    # Smooth and threshold image
+    blurred = cv2.blur(log_image, (3, 3))
+    _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
-    # Adaptive binarization
-    _, BW = cv2.threshold(filtered_im, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    # Morphological opening to clean noise
+    kernel = np.ones((5, 5), np.uint8)
+    binary_cleaned = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
 
-    # Morphological operations (opening)
-    se = np.ones((5, 5), np.uint8)
-    BW = cv2.morphologyEx(BW, cv2.MORPH_OPEN, se)
-
-    # Detect circles using Hough Transform (substitute imfindcircles)
-    # Hough Circle Transform
-    circles = cv2.HoughCircles(BW, cv2.HOUGH_GRADIENT, dp=1, minDist=30,
-                               param1=50, param2=30, minRadius=30, maxRadius=100)
+    # Hough Circle Detection
+    circles = cv2.HoughCircles(binary_cleaned, cv2.HOUGH_GRADIENT, dp=1, minDist=30,
+                                param1=50, param2=30, minRadius=30, maxRadius=100)
 
     if circles is not None:
         circles = np.round(circles[0, :]).astype("int")
         centers = circles[:, :2]
         radii = circles[:, 2]
 
-        # Plot the results
-        plt.imshow(log_im, cmap='gray')
-        for (x, y, r) in zip(centers[:, 0], centers[:, 1], radii):
+        plt.imshow(log_image, cmap='gray')
+        for x, y, r in zip(centers[:, 0], centers[:, 1], radii):
             plt.gca().add_patch(plt.Circle((x, y), r, color='r', fill=False, linewidth=2))
-        plt.title('Detected Circles')
+        plt.title('Detected Beads')
         plt.show()
 
         return centers, radii
